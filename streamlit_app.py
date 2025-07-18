@@ -1,126 +1,13 @@
-{
- "cells": [
-  {
-   "cell_type": "code",
-   "execution_count": null,
-   "id": "a17815b6-0792-4a71-90c2-f2e24ad3844e",
-   "metadata": {},
-   "outputs": [],
-   "source": [
-    "import streamlit as st\n",
-    "import pandas as pd\n",
-    "import numpy as np\n",
-    "import faiss\n",
-    "from openai import OpenAI\n",
-    "import os\n",
-    "from dotenv import load_dotenv\n",
-    "\n",
-    "# === Cargar API Key ===\n",
-    "load_dotenv()\n",
-    "client = OpenAI(api_key=os.getenv(\"OPENAI_API_KEY\"))\n",
-    "\n",
-    "# === Cargar datos ===\n",
-    "df_prog = pd.read_excel(\"Programas1.xlsx\")\n",
-    "df_broch = pd.read_csv(\"brochures_extraidos.csv\")\n",
-    "df = pd.merge(df_prog, df_broch, left_on=\"Brochure\", right_on=\"URL\", how=\"left\")\n",
-    "\n",
-    "# === Preparar descripciones ===\n",
-    "df[\"descripcion_rag\"] = df[\"Nombre de Programa\"] + \" - Modalidad: \" + df[\"Unidad de Negocio\"]\n",
-    "df = df.dropna(subset=[\"descripcion_rag\"])\n",
-    "descripciones = df[\"descripcion_rag\"].tolist()\n",
-    "\n",
-    "# === Embeddings ===\n",
-    "@st.cache_resource(show_spinner=False)\n",
-    "def construir_indice():\n",
-    "    textos, vectores = [], []\n",
-    "\n",
-    "    for texto in descripciones:\n",
-    "        try:\n",
-    "            emb = client.embeddings.create(\n",
-    "                input=texto,\n",
-    "                model=\"text-embedding-3-small\"\n",
-    "            ).data[0].embedding\n",
-    "            textos.append(texto)\n",
-    "            vectores.append(emb)\n",
-    "        except:\n",
-    "            continue\n",
-    "\n",
-    "    dim = len(vectores[0])\n",
-    "    index = faiss.IndexFlatL2(dim)\n",
-    "    index.add(np.array(vectores).astype(\"float32\"))\n",
-    "    return index, textos\n",
-    "\n",
-    "index, textos = construir_indice()\n",
-    "\n",
-    "# === Buscar programa ===\n",
-    "def buscar_programa(pregunta, k=1):\n",
-    "    emb_q = client.embeddings.create(\n",
-    "        input=pregunta,\n",
-    "        model=\"text-embedding-3-small\"\n",
-    "    ).data[0].embedding\n",
-    "    D, I = index.search(np.array([emb_q]).astype(\"float32\"), k)\n",
-    "    return I[0]\n",
-    "\n",
-    "# === Generar respuesta ===\n",
-    "def responder_con_contexto(pregunta):\n",
-    "    idx = buscar_programa(pregunta)[0]\n",
-    "    fila = df.iloc[idx]\n",
-    "    programa = fila[\"Nombre de Programa\"]\n",
-    "    texto = fila[\"Texto Brochure\"]\n",
-    "\n",
-    "    prompt = f\"\"\"\n",
-    "Usa la siguiente información sobre programas académicos para responder como si fueras un asesor universitario claro, amable y directo. Si no tienes suficiente información, responde con honestidad.\n",
-    "\n",
-    "--- PROGRAMA SELECCIONADO ---\n",
-    "{programa}\n",
-    "\n",
-    "--- TEXTO DEL BROCHURE ---\n",
-    "{texto}\n",
-    "\n",
-    "--- PREGUNTA ---\n",
-    "{pregunta}\n",
-    "\n",
-    "--- RESPUESTA ---\n",
-    "\"\"\"\n",
-    "    respuesta = client.chat.completions.create(\n",
-    "        model=\"gpt-4\",\n",
-    "        messages=[{\"role\": \"user\", \"content\": prompt}],\n",
-    "        temperature=0.3\n",
-    "    )\n",
-    "    return respuesta.choices[0].message.content.strip()\n",
-    "\n",
-    "# === Interfaz Streamlit ===\n",
-    "st.title(\"🎓 Asistente de Programas Académicos\")\n",
-    "st.write(\"Haz una pregunta sobre un programa académico y te responderé con base en la información oficial.\")\n",
-    "\n",
-    "pregunta = st.text_input(\"¿Qué deseas saber?\")\n",
-    "if pregunta:\n",
-    "    with st.spinner(\"Buscando respuesta...\"):\n",
-    "        respuesta = responder_con_contexto(pregunta)\n",
-    "        st.success(\"Respuesta:\")\n",
-    "        st.write(respuesta)\n"
-   ]
-  }
- ],
- "metadata": {
-  "kernelspec": {
-   "display_name": "Python 3 (ipykernel)",
-   "language": "python",
-   "name": "python3"
-  },
-  "language_info": {
-   "codemirror_mode": {
-    "name": "ipython",
-    "version": 3
-   },
-   "file_extension": ".py",
-   "mimetype": "text/x-python",
-   "name": "python",
-   "nbconvert_exporter": "python",
-   "pygments_lexer": "ipython3",
-   "version": "3.11.7"
-  }
- },
- "nbformat": 4,
- "nbformat_minor": 5
-}
+import streamlit as st
+
+st.title("🎓 Buscador de Programas Académicos")
+st.write("Haz una pregunta sobre un programa y te responderé con base en el brochure.")
+
+pregunta = st.text_input("Escribe tu pregunta aquí")
+
+if pregunta:
+    st.write("🧠 Procesando pregunta...")
+
+    # Aquí iría tu lógica de respuesta con RAG
+    respuesta = "Esta es una respuesta simulada mientras conectamos el motor RAG."
+    st.success(respuesta)
