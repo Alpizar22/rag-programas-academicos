@@ -1,78 +1,75 @@
 import streamlit as st
 import pandas as pd
-import faiss
 import numpy as np
-from openai import OpenAI
+import faiss
 import os
 from dotenv import load_dotenv
+from openai import OpenAI
 
-# === Cargar API Key ===
+# === 1. Configuración ===
 load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# === 1. Cargar datos ===
+# === 2. Cargar datos ===
 df_prog = pd.read_excel("Programas1.xlsx")
 df_broch = pd.read_csv("brochures_extraidos.csv")
-
-# Asegurar nombre de columna para hacer merge
 df_broch.rename(columns={"Programa": "Nombre de Programa"}, inplace=True)
-
-# === 2. Combinar datasets ===
 df = pd.merge(df_prog, df_broch, on="Nombre de Programa", how="left")
 
-# Crear columna de texto combinado
+# === 3. Crear texto completo ===
 df["texto_completo"] = (
     df["Nombre de Programa"].fillna("") + " | Modalidad: " + df["Modalidad"].fillna("") +
     " | Unidad: " + df["Unidad de Negocio"].fillna("") +
     " | " + df["Texto Brochure"].fillna("")
 )
 
-# === 3. Crear embeddings ===
-@st.cache_resource(show_spinner="Cargando embeddings...")
-def construir_indice(df):
-    def get_embedding(texto):
-        response = client.embeddings.create(
-            input=texto,
-            model="text-embedding-3-small"
-        )
-        return response.data[0].embedding
+# === 4. Embeddings ===
+def get_embedding(texto):
+    response = client.embeddings.create(
+        input=texto,
+        model="text-embedding-3-small"
+    )
+    return response.data[0].embedding
 
-    textos = []
-    vectores = []
-    for texto in df["texto_completo"].dropna().unique():
-        try:
-            emb = get_embedding(texto)
-            textos.append(texto)
-            vectores.append(emb)
-        except Exception as e:
-            print(f"❌ Error con texto: {texto[:30]}... | {e}")
+textos = df["texto_completo"].dropna().unique().tolist()
+vectores = [get_embedding(t) for t in textos]
 
-    dim = len(vectores[0])
-    index = faiss.IndexFlatL2(dim)
-    index.add(np.array(vectores).astype("float32"))
+index = faiss.IndexFlatL2(len(vectores[0]))
+index.add(np.array(vectores).astype("float32"))
 
-    return index, textos
+# === 5. Sinónimos para expansión de preguntas ===
+sinonimos = {
+    "materias": ["asignaturas", "temario", "contenidos", "plan de estudios"],
+    "duración": ["cuánto dura", "tiempo de estudio", "años del programa"],
+    "costo": ["precio", "valor", "cuánto cuesta", "tarifa"],
+}
 
-index, textos = construir_indice(df)
+def expandir_pregunta(pregunta):
+    preguntas = [pregunta]
+    for palabra, variantes in sinonimos.items():
+        if palabra in pregunta.lower():
+            preguntas += [pregunta.lower().replace(palabra, alt) for alt in variantes]
+    return preguntas
 
-# === 4. Función para buscar contexto ===
-def buscar_contexto(pregunta, k=2):
-    def get_embedding(texto):
-        response = client.embeddings.create(
-            input=texto,
-            model="text-embedding-3-small"
-        )
-        return response.data[0].embedding
+# === 6. Buscar textos relevantes ===
+def buscar_contexto(pregunta, k=3):
+    alternativas = expandir_pregunta(pregunta)
+    candidatos = []
 
-    query_emb = get_embedding(pregunta)
-    D, I = index.search(np.array([query_emb]).astype("float32"), k)
-    return [textos[i] for i in I[0]]
+    for alt in alternativas:
+        emb = get_embedding(alt)
+        D, I = index.search(np.array([emb]).astype("float32"), k)
+        candidatos += [(textos[i], D[0][j]) for j, i in enumerate(I[0])]
 
-# === 5. Generar respuesta con contexto ===
+    candidatos = sorted(candidatos, key=lambda x: x[1])
+    return [c[0] for c in candidatos[:k]]
+
+# === 7. Generar respuesta ===
 def responder_con_contexto(pregunta):
-    contexto = buscar_contexto(pregunta)
+    contexto = buscar_contexto(pregunta, k=2)
     prompt = f"""
-Usa la siguiente información sobre programas académicos para responder como si fueras un asesor universitario claro, amable y directo. Si no tienes suficiente información, responde con honestidad.
+Responde como un asesor académico profesional y claro. Usa la siguiente información para contestar.
+Si no tienes suficiente información, responde con sinceridad.
 
 --- CONTEXTO ---
 {chr(10).join(contexto)}
@@ -89,13 +86,12 @@ Usa la siguiente información sobre programas académicos para responder como si
     )
     return respuesta.choices[0].message.content.strip()
 
-# === 6. Interfaz en Streamlit ===
-st.title("🎓 Buscador de Programas Académicos")
-st.write("Haz una pregunta sobre un programa académico y te responderé con base en el catálogo y brochures institucionales.")
-
-pregunta = st.text_input("✍️ Escribe tu pregunta aquí:")
+# === 8. Interfaz Streamlit ===
+st.title("🎓 Asistente de Programas Académicos")
+pregunta = st.text_input("Haz una pregunta sobre un programa académico:")
 
 if pregunta:
-    with st.spinner("Buscando respuesta..."):
+    with st.spinner("Buscando la mejor respuesta..."):
         respuesta = responder_con_contexto(pregunta)
-        st.success(respuesta)
+    st.markdown("### 🧠 Respuesta:")
+    st.write(respuesta)
