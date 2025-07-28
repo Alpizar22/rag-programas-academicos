@@ -1,47 +1,29 @@
 import streamlit as st
 import pandas as pd
+import openai
 import numpy as np
-import faiss
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
+import tiktoken
 import os
-from dotenv import load_dotenv
-from openai import OpenAI
 
-# === 1. Configuración ===
-load_dotenv()
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# === Cargar datos ===
+brochures = pd.read_csv("brochures_extraidos.csv")
+perfil_df = pd.read_excel("perfil_completo_sibila_resumen.xlsx", sheet_name="Descripción del perfil")
 
-# === 2. Cargar datos ===
-df_prog = pd.read_excel("Programas1.xlsx")
-df_broch = pd.read_csv("brochures_extraidos.csv")
-df_broch.rename(columns={"Programa": "Nombre de Programa"}, inplace=True)
-df = pd.merge(df_prog, df_broch, on="Nombre de Programa", how="left")
+# === Inicializar modelo de embeddings ===
+embedder = SentenceTransformer("all-MiniLM-L6-v2")
 
-# === 3. Crear texto completo ===
-df["texto_completo"] = (
-    df["Nombre de Programa"].fillna("") + " | Modalidad: " + df["Modalidad"].fillna("") +
-    " | Unidad: " + df["Unidad de Negocio"].fillna("") +
-    " | " + df["Texto Brochure"].fillna("")
-)
+# === Embeddings del brochure ===
+brochures = brochures.dropna(subset=["Texto Brochure"])
+brochures["embedding"] = brochures["Texto Brochure"].apply(lambda x: embedder.encode(x, convert_to_tensor=False))
 
-# === 4. Embeddings ===
-def get_embedding(texto):
-    response = client.embeddings.create(
-        input=texto,
-        model="text-embedding-3-small"
-    )
-    return response.data[0].embedding
-
-textos = df["texto_completo"].dropna().unique().tolist()
-vectores = [get_embedding(t) for t in textos]
-
-index = faiss.IndexFlatL2(len(vectores[0]))
-index.add(np.array(vectores).astype("float32"))
-
-# === 5. Sinónimos para expansión de preguntas ===
+# === Sinónimos para expansión de preguntas ===
 sinonimos = {
     "materias": ["asignaturas", "temario", "contenidos", "plan de estudios"],
     "duración": ["cuánto dura", "tiempo de estudio", "años del programa"],
     "costo": ["precio", "valor", "cuánto cuesta", "tarifa"],
+    "perfil": ["tipo de estudiante", "características del aspirante", "perfil del alumno"],
 }
 
 def expandir_pregunta(pregunta):
@@ -51,88 +33,54 @@ def expandir_pregunta(pregunta):
             preguntas += [pregunta.lower().replace(palabra, alt) for alt in variantes]
     return preguntas
 
-# === 6. Buscar textos relevantes ===
-def buscar_contexto(pregunta, k=3):
-    alternativas = expandir_pregunta(pregunta)
-    candidatos = []
+# === Función para obtener tokens ===
+def contar_tokens(texto, modelo="gpt-4"):
+    encoding = tiktoken.encoding_for_model(modelo)
+    return len(encoding.encode(texto))
 
-    for alt in alternativas:
-        emb = get_embedding(alt)
-        D, I = index.search(np.array([emb]).astype("float32"), k)
-        candidatos += [(textos[i], D[0][j]) for j, i in enumerate(I[0])]
+# === Configuración OpenAI ===
+openai.api_key = st.secrets["openai_api_key"]
 
-    candidatos = sorted(candidatos, key=lambda x: x[1])
-    return [c[0] for c in candidatos[:k]]
+# === Historial de conversación ===
+if "historial" not in st.session_state:
+    st.session_state.historial = []
 
-# === 7. Generar respuesta ===
-def responder_con_contexto(pregunta):
-    contexto = buscar_contexto(pregunta, k=2)
-    prompt = f"""
-Responde como un asesor académico profesional y claro. Usa la siguiente información para contestar.
-Si no tienes suficiente información, responde con sinceridad.
+# === Interfaz ===
+st.title("🔍 Asistente de Programas Académicos")
+pregunta = st.text_input("¿Qué quieres saber sobre un programa académico?")
 
---- CONTEXTO ---
-{chr(10).join(contexto)}
-
---- PREGUNTA ---
-{pregunta}
-
---- RESPUESTA ---
-"""
-    respuesta = client.chat.completions.create(
-        model="gpt-4",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.3
-    )
-    return respuesta.choices[0].message.content.strip()
-
-# === 8. Generar perfil interpretativo por aspirante ===
-def generar_perfil_aspirante(programa, estado, fase, palabras_clave, motivo_descartado=None):
-    pregunta = f"""
-Dado que un aspirante está interesado en el programa '{programa}',
-vive en {estado}, se encuentra en la fase '{fase}' del proceso
-y ha utilizado palabras como: {palabras_clave}.
-{f'Se descartó por: {motivo_descartado}.' if motivo_descartado else ''}
-
-Genera un análisis breve y profesional con:
-1. Perfil probable del aspirante
-2. Posibles riesgos de desalineación con el programa
-3. Recomendaciones para seguimiento o reasignación
-"""
-    contexto = buscar_contexto(programa, k=2)
-    prompt = f"""--- CONTEXTO ---\n{chr(10).join(contexto)}\n\n--- PREGUNTA ---\n{pregunta}"""
-
-    respuesta = client.chat.completions.create(
-        model="gpt-4",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.3
-    )
-    return respuesta.choices[0].message.content.strip()
-
-# === 9. Interfaz Streamlit ===
-st.title("🎓 Asistente de Programas Académicos")
-
-# Consulta normal
-st.markdown("## 🔍 Pregunta sobre un programa")
-pregunta = st.text_input("Haz una pregunta sobre un programa académico:")
 if pregunta:
-    with st.spinner("Buscando la mejor respuesta..."):
-        respuesta = responder_con_contexto(pregunta)
-    st.markdown("### 🧠 Respuesta:")
+    st.session_state.historial.append({"role": "user", "content": pregunta})
+    
+    pregunta_embedding = embedder.encode(pregunta, convert_to_tensor=False)
+    brochures["score"] = brochures["embedding"].apply(lambda x: cosine_similarity([x], [pregunta_embedding])[0][0])
+    top = brochures.sort_values("score", ascending=False).iloc[0]
+
+    # Limitar el contexto a 500 tokens
+    contexto = top["Texto Brochure"]
+    while contar_tokens(contexto) > 500:
+        contexto = contexto[:len(contexto) - 100]
+
+    # Construir prompt con historial
+    mensajes = st.session_state.historial.copy()
+    mensajes.insert(0, {"role": "system", "content": "Eres un asistente experto en programas académicos. Usa el contexto proporcionado para responder con claridad y precisión. Si no hay información relevante, responde solo si el programa es 'Analítica de Negocios', usando el perfil típico como sugerencia secundaria."})
+    mensajes.append({"role": "user", "content": f"CONTEXTO:\n{contexto}\n\nPregunta: {pregunta}\nResponde en español, con máximo 600 tokens."})
+
+    respuesta = openai.ChatCompletion.create(
+        model="gpt-4",
+        messages=mensajes,
+        max_tokens=600
+    )["choices"][0]["message"]["content"]
+
+    # Si la respuesta es irrelevante y es Analítica de Negocios, usar perfil interpretativo como respaldo
+    if ("no tengo" in respuesta.lower() or len(respuesta.strip()) < 50) and "analítica de negocios" in pregunta.lower():
+        respuesta = perfil_df.iloc[0, 0]
+
+    st.session_state.historial.append({"role": "assistant", "content": respuesta})
+
+    st.markdown("### 📘 Respuesta:")
     st.write(respuesta)
 
-# Análisis por aspirante
-st.markdown("## 👤 Análisis por aspirante")
-col1, col2 = st.columns(2)
-programa = col1.selectbox("Programa", df["Nombre de Programa"].unique())
-estado = col2.text_input("Estado de procedencia")
-fase = st.selectbox("Fase del proceso", ["Por contactar", "Interesado", "Indeciso", "Inscrito", "Descarte"])
-palabras = st.text_area("Palabras clave del aspirante")
-motivo = st.text_input("Motivo de descarte (opcional)")
-
-if st.button("Generar perfil interpretativo"):
-    with st.spinner("Generando análisis..."):
-        perfil = generar_perfil_aspirante(programa, estado, fase, palabras, motivo)
-    st.markdown("### 🧠 Perfil generado:")
-    st.write(perfil)
+    st.markdown("---")
+    st.markdown(f"🔎 Contexto usado (truncado):\n\n{contexto[:1000]}...")
 
