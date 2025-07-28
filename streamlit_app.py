@@ -86,12 +86,53 @@ Si no tienes suficiente información, responde con sinceridad.
     )
     return respuesta.choices[0].message.content.strip()
 
-# === 8. Interfaz Streamlit ===
-st.title("🎓 Asistente de Programas Académicos")
-pregunta = st.text_input("Haz una pregunta sobre un programa académico:")
+# === 8. Generar perfil interpretativo por aspirante ===
+def generar_perfil_aspirante(programa, estado, fase, palabras_clave, motivo_descartado=None):
+    pregunta = f"""
+Dado que un aspirante está interesado en el programa '{programa}',
+vive en {estado}, se encuentra en la fase '{fase}' del proceso
+y ha utilizado palabras como: {palabras_clave}.
+{f'Se descartó por: {motivo_descartado}.' if motivo_descartado else ''}
 
+Genera un análisis breve y profesional con:
+1. Perfil probable del aspirante
+2. Posibles riesgos de desalineación con el programa
+3. Recomendaciones para seguimiento o reasignación
+"""
+    contexto = buscar_contexto(programa, k=2)
+    prompt = f"""--- CONTEXTO ---\n{chr(10).join(contexto)}\n\n--- PREGUNTA ---\n{pregunta}"""
+
+    respuesta = client.chat.completions.create(
+        model="gpt-4",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.3
+    )
+    return respuesta.choices[0].message.content.strip()
+
+# === 9. Interfaz Streamlit ===
+st.title("🎓 Asistente de Programas Académicos")
+
+# Consulta normal
+st.markdown("## 🔍 Pregunta sobre un programa")
+pregunta = st.text_input("Haz una pregunta sobre un programa académico:")
 if pregunta:
     with st.spinner("Buscando la mejor respuesta..."):
         respuesta = responder_con_contexto(pregunta)
     st.markdown("### 🧠 Respuesta:")
     st.write(respuesta)
+
+# Análisis por aspirante
+st.markdown("## 👤 Análisis por aspirante")
+col1, col2 = st.columns(2)
+programa = col1.selectbox("Programa", df["Nombre de Programa"].unique())
+estado = col2.text_input("Estado de procedencia")
+fase = st.selectbox("Fase del proceso", ["Por contactar", "Interesado", "Indeciso", "Inscrito", "Descarte"])
+palabras = st.text_area("Palabras clave del aspirante")
+motivo = st.text_input("Motivo de descarte (opcional)")
+
+if st.button("Generar perfil interpretativo"):
+    with st.spinner("Generando análisis..."):
+        perfil = generar_perfil_aspirante(programa, estado, fase, palabras, motivo)
+    st.markdown("### 🧠 Perfil generado:")
+    st.write(perfil)
+
